@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Захват мира</title>
+<style>
+:root{--bg:#070b14;--ink:#e8edf7;--mut:#8b97b0;--panel:#0f1727cc}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:Georgia,'Times New Roman',serif;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none}
+canvas{display:block}
+#top{position:fixed;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top,0px) + 8px) 10px 8px;background:linear-gradient(#070b14ee,#070b1400);pointer-events:none}
+#phase{font-size:18px;font-weight:bold;letter-spacing:.02em}
+#legend{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
+.chip{display:flex;align-items:center;gap:6px;padding:3px 9px;border-radius:14px;background:var(--panel);font:13px system-ui,sans-serif;border:2px solid transparent}
+.chip.on{border-color:#fff}.chip.dead{opacity:.35;text-decoration:line-through}
+.dot{width:10px;height:10px;border-radius:50%}
+#bot{position:fixed;left:0;right:0;bottom:0;padding:10px 10px calc(env(safe-area-inset-bottom,0px) + 12px);display:flex;gap:10px;align-items:flex-end;background:linear-gradient(#070b1400,#070b14f0)}
+#log{flex:1;font:13px/1.35 system-ui,sans-serif;color:var(--mut);min-height:36px;pointer-events:none}
+#btn{padding:14px 18px;border:0;border-radius:12px;background:#e8b44a;color:#1a1204;font:bold 16px Georgia,serif;cursor:pointer}
+#btn:disabled{opacity:.4}
+#end{position:fixed;inset:0;display:none;flex-direction:column;gap:16px;align-items:center;justify-content:center;background:#070b14e6;text-align:center;font-size:30px}
+#end button{padding:14px 26px;border:0;border-radius:12px;background:#e8b44a;font:bold 16px Georgia,serif}
+#menu{position:fixed;inset:0;z-index:5;display:flex;flex-direction:column;gap:14px;align-items:center;justify-content:center;background:radial-gradient(#13203a,#070b14)}
+#menu h1{font-size:38px;margin:0 0 18px}
+#menu button,#mb{border:0;border-radius:12px;background:#e8b44a;color:#1a1204;font:bold 17px Georgia,serif;cursor:pointer}
+#menu button{width:240px;padding:16px}
+#mb{pointer-events:auto;position:absolute;right:10px;top:calc(env(safe-area-inset-top,0px) + 8px);padding:7px 12px;font-size:14px}
+</style></head><body>
+<div id="top"><button id="mb" onclick="location.reload()">Меню</button><div id="phase"></div><div id="legend"></div></div>
+<div id="bot"><div id="log"></div><button id="btn"></button></div>
+<div id="menu"><h1>Захват мира</h1><button onclick="start('flat')">Плоская карта</button><button onclick="start('3d')">3D глобус</button></div>
+<div id="end"><div id="endt"></div><button onclick="location.reload()">Играть снова</button></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ===== НАСТРОЙКИ =====
+const CONFIG={
+  N:48,                         // число территорий
+  MAP_IMAGE:'img/earth.jpg',    // твоя картинка карты (необязательно, равнопромежуточная 2:1)
+  NAMES:['Вы','Красные','Зелёные','Жёлтые'],
+  COLORS:['#3b82f6','#ef4444','#22c55e','#eab308']
+};
+const P=CONFIG.NAMES.length,N=CONFIG.N,rnd=n=>Math.random()*n|0,sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+// ===== ТЕРРИТОРИИ НА СФЕРЕ =====
+const pts=[];
+for(let i=0;i<N;i++){
+  const y=1-2*(i+.5)/N,r=Math.sqrt(1-y*y),t=i*2.399963;
+  pts.push(new THREE.Vector3(Math.cos(t)*r+(Math.random()-.5)*.12,y+(Math.random()-.5)*.12,Math.sin(t)*r+(Math.random()-.5)*.12).normalize());
+}
+const nbSet=pts.map(()=>new Set());
+pts.forEach((p,i)=>{
+  pts.map((q,j)=>[j,p.dot(q)]).filter(a=>a[0]!==i).sort((a,b)=>b[1]-a[1]).slice(0,5).forEach(([j])=>{nbSet[i].add(j);nbSet[j].add(i)});
+});
+const nb=nbSet.map(s=>[...s]);
+
+// ===== СОСТОЯНИЕ =====
+const owner=[],troops=[];
+const order=[...Array(N).keys()].sort(()=>Math.random()-.5);
+order.forEach((t,k)=>{owner[t]=k%P;troops[t]=1+rnd(3)});
+let sel=null,tg=new Set(),phase='reinforce',pool=0,busy=false,finished=false;
+const cnt=p=>owner.filter(o=>o===p).length,alive=p=>cnt(p)>0;
+
+// ===== 3D СЦЕНА =====
+const scene=new THREE.Scene(),cam=new THREE.PerspectiveCamera(45,innerWidth/innerHeight,.1,100);
+cam.position.z=3.4;
+const ren=new THREE.WebGLRenderer({antialias:true});
+ren.setPixelRatio(Math.min(devicePixelRatio,2));ren.setSize(innerWidth,innerHeight);
+document.body.prepend(ren.domElement);
+scene.add(new THREE.AmbientLight(0xffffff,.75));
+const sun=new THREE.DirectionalLight(0xffffff,.8);sun.position.set(3,2,4);scene.add(sun);
+const stars=new THREE.BufferGeometry(),sp=[];
+for(let i=0;i<700;i++){const v=new THREE.Vector3(Math.random()-.5,Math.random()-.5,Math.random()-.5).normalize().multiplyScalar(30);sp.push(v.x,v.y,v.z)}
+stars.setAttribute('position',new THREE.Float32BufferAttribute(sp,3));
+scene.add(new THREE.Points(stars,new THREE.PointsMaterial({size:.12,color:0x9fb4d8})));
+
+const globe=new THREE.Group();scene.add(globe);
+const W=512,H=256,cv=document.createElement('canvas');cv.width=W;cv.height=H;
+const cx=cv.getContext('2d'),tmp=document.createElement('canvas');tmp.width=W;tmp.height=H;
+const tx=tmp.getContext('2d'),tex=new THREE.CanvasTexture(cv);
+const mesh=new THREE.Mesh(new THREE.SphereGeometry(1,64,48),new THREE.MeshPhongMaterial({map:tex,shininess:8}));
+globe.add(mesh);
+globe.add(new THREE.Mesh(new THREE.SphereGeometry(1.06,48,32),new THREE.MeshBasicMaterial({color:0x4a8cff,transparent:true,opacity:.12,side:THREE.BackSide})));
+
+// карта: какой пиксель текстуры к какой территории относится
+const map=new Uint8Array(W*H);
+for(let y=0;y<H;y++){const th=y/H*Math.PI,s=Math.sin(th),c=Math.cos(th);
+  for(let x=0;x<W;x++){const ph=x/W*2*Math.PI,px=-Math.cos(ph)*s,pz=Math.sin(ph)*s;
+    let b=0,bd=-2;for(let i=0;i<N;i++){const p=pts[i],d=p.x*px+p.y*c+p.z*pz;if(d>bd){bd=d;b=i}}
+    map[y*W+x]=b}}
+const rgb=CONFIG.COLORS.map(h=>[1,3,5].map(i=>parseInt(h.substr(i,2),16)));
+let img=null;
+function paint(){
+  const id=tx.createImageData(W,H),d=id.data;
+  for(let k=0;k<W*H;k++){
+    const m=map[k],x=k%W,y=k/W|0,o=k*4;
+    const edge=(x<W-1&&map[k+1]!==m)||(y<H-1&&map[k+W]!==m);
+    const c=rgb[owner[m]],f=edge?.25:.75+(m%5)*.06;
+    d[o]=c[0]*f;d[o+1]=c[1]*f;d[o+2]=c[2]*f;d[o+3]=255;
+  }
+  tx.putImageData(id,0,0);
+  cx.globalAlpha=1;
+  if(img){cx.drawImage(img,0,0,W,H);cx.globalAlpha=.5}
+  cx.drawImage(tmp,0,0);tex.needsUpdate=true;
+}
+const im=new Image();im.onload=()=>{img=im;paint()};im.src=CONFIG.MAP_IMAGE; // нет файла — просто игнорируется
+
+// маркеры войск
+const mc=[],mt=[],ms=[];
+pts.forEach((p,i)=>{
+  const c=document.createElement('canvas');c.width=c.height=64;
+  const t=new THREE.CanvasTexture(c),s=new THREE.Sprite(new THREE.SpriteMaterial({map:t}));
+  s.position.copy(p).multiplyScalar(1.03);s.scale.set(.15,.15,1);
+  globe.add(s);mc.push(c);mt.push(t);ms.push(s);
+});
+function mk(i){
+  const x=mc[i].getContext('2d');x.clearRect(0,0,64,64);
+  const hl=sel===i||tg.has(i);
+  x.beginPath();x.arc(32,32,24,0,7);x.fillStyle='#0b1220';x.fill();
+  x.lineWidth=5;x.strokeStyle=CONFIG.COLORS[owner[i]];x.stroke();
+  if(hl){x.lineWidth=4;x.strokeStyle=sel===i?'#fff':'#ffe14a';x.beginPath();x.arc(32,32,29,0,7);x.stroke()}
+  x.fillStyle='#fff';x.font='bold 26px sans-serif';x.textAlign='center';x.textBaseline='middle';
+  x.fillText(troops[i],32,34);mt[i].needsUpdate=true;
+  ms[i].scale.setScalar(hl?.19:.15);
+}
+const mkAll=()=>{for(let i=0;i<N;i++)mk(i)};
+
+// ===== ИНТЕРФЕЙС =====
+const $=id=>document.getElementById(id),btn=$('btn');
+const setLog=t=>$('log').textContent=t;
+function hud(){
+  $('phase').textContent=finished?'Игра окончена':busy?'Ходят соперники…':phase==='reinforce'?`Расстановка: осталось ${pool}`:phase==='move'?'Перегруппировка: откуда → куда':'Атака: выберите свою территорию и цель';
+  $('legend').innerHTML=CONFIG.NAMES.map((n,p)=>`<div class="chip ${alive(p)?'':'dead'}"><span class="dot" style="background:${CONFIG.COLORS[p]}"></span>${n} ${cnt(p)}</div>`).join('');
+  btn.textContent=phase==='reinforce'?'Авто-расстановка':phase==='attack'?'Перегруппировка':'Закончить ход';
+  btn.disabled=busy||finished;
+}
+function reach(s){const seen=new Set([s]),q=[s];while(q.length){const a=q.pop();nb[a].forEach(j=>{if(owner[j]===0&&!seen.has(j)){seen.add(j);q.push(j)}})}seen.delete(s);return [...seen]}
+function setSel(s){sel=s;tg=new Set(s==null?[]:phase==='move'?reach(s):nb[s].filter(j=>owner[j]!==0));mkAll()}
+
+// ===== ПРАВИЛА =====
+function startTurn(){pool=Math.max(3,Math.floor(cnt(0)/3));phase='reinforce';setSel(null);hud();setLog(`Вы получили ${pool} войск. Нажимайте на свои территории.`)}
+function battle(a,d){
+  const ad=Math.min(3,troops[a]-1),dd=Math.min(2,troops[d]);
+  const roll=n=>Array.from({length:n},()=>1+rnd(6)).sort((x,y)=>y-x),A=roll(ad),D=roll(dd);
+  for(let i=0;i<Math.min(ad,dd);i++)A[i]>D[i]?troops[d]--:troops[a]--;
+  if(troops[d]<=0){
+    const mv=Math.min(troops[a]-1,Math.max(1,Math.floor(troops[a]/2)));
+    troops[a]-=mv;troops[d]=mv;owner[d]=owner[a];paint();return true;
+  }
+  return false;
+}
+function checkEnd(){
+  if(!alive(0)){fin('Поражение');return true}
+  if(cnt(0)===N){fin('Мир захвачен!');return true}
+  return false;
+}
+function fin(t){finished=true;$('endt').textContent=t;$('end').style.display='flex';hud()}
+
+function pick(i){
+  if(busy||finished)return;
+  if(phase==='move'){
+    if(owner[i]!==0)return;
+    if(sel!=null&&tg.has(i)){
+      const n=Math.max(1,Math.ceil((troops[sel]-1)/2));
+      troops[sel]-=n;troops[i]+=n;setLog(`Перенесено войск: ${n}`);
+      setSel(troops[sel]>1?sel:null);hud();return;
+    }
+    setSel(troops[i]>1?i:null);return;
+  }
+  if(phase==='reinforce'){
+    if(owner[i]!==0||pool<=0)return;
+    troops[i]++;pool--;mk(i);
+    if(pool===0){phase='attack';setLog('Фаза атаки. Каждый клик по цели — один бой.')}
+    hud();return;
+  }
+  if(owner[i]===0){setSel(troops[i]>1?i:null);if(troops[i]<2)setLog('Нужно минимум 2 войска.');return}
+  if(sel!=null&&tg.has(i)){
+    const a=sel,had=troops[a],won=battle(a,i);
+    if(won){setLog(`Территория захвачена!`);if(checkEnd())return;setSel(troops[a]>1?a:null)}
+    else{setLog(`Бой: у вас ${troops[a]}, у врага ${troops[i]}`);if(troops[a]<2)setSel(null);else mkAll()}
+    mk(a);mk(i);hud();
+  }
+}
+btn.onclick=()=>{
+  if(busy||finished)return;
+  if(phase==='reinforce'){
+    const mine=owner.map((o,i)=>o===0?i:-1).filter(i=>i>=0),bd=mine.filter(i=>nb[i].some(j=>owner[j]!==0));
+    while(pool>0){const l=bd.length?bd:mine;troops[l[rnd(l.length)]]++;pool--}
+    phase='attack';mkAll();hud();setLog('Фаза атаки.');
+  }else if(phase==='attack'){
+    phase='move';setSel(null);hud();setLog('Выберите территорию, откуда переносить, затем куда (по цепочке своих). Тап = половина войск.');
+  }else endTurn();
+};
+async function endTurn(){
+  busy=true;setSel(null);hud();
+  for(let p=1;p<P;p++){
+    if(!alive(p))continue;
+    const n=ai(p);setLog(`${CONFIG.NAMES[p]}: захвачено территорий — ${n}`);
+    mkAll();hud();await sleep(700);
+    if(checkEnd())return;
+  }
+  busy=false;startTurn();
+}
+function ai(p){
+  const mine=()=>owner.map((o,i)=>o===p?i:-1).filter(i=>i>=0);
+  let pl=Math.max(3,Math.floor(mine().length/3));
+  const bd=mine().filter(i=>nb[i].some(j=>owner[j]!==p));
+  while(pl-->0){const l=bd.length?bd:mine();troops[l[rnd(l.length)]]++}
+  let got=0;
+  for(let k=0;k<25;k++){
+    const o=[];
+    mine().forEach(i=>{if(troops[i]>=3)nb[i].forEach(j=>{if(owner[j]!==p&&troops[i]>troops[j]+1)o.push([i,j])})});
+    if(!o.length)break;
+    const [a,d]=o[rnd(o.length)];
+    while(troops[a]>=2&&troops[a]>troops[d]){if(battle(a,d)){got++;break}}
+  }
+  return got;
+}
+
+// ===== УПРАВЛЕНИЕ: вращение, зум, клик =====
+const ptrs=new Map(),ray=new THREE.Raycaster();
+let moved=0,pinch=0;
+ren.domElement.addEventListener('pointerdown',e=>{ptrs.set(e.pointerId,[e.clientX,e.clientY]);moved=0;pinch=0;ren.domElement.setPointerCapture(e.pointerId)});
+ren.domElement.addEventListener('pointermove',e=>{
+  const o=ptrs.get(e.pointerId);if(!o)return;
+  const n=[e.clientX,e.clientY];
+  if(ptrs.size===1){
+    const dx=n[0]-o[0],dy=n[1]-o[1];moved+=Math.abs(dx)+Math.abs(dy);
+    if(mode==='flat')ox+=dx;else{
+    const k=.005*cam.position.z/3.4;
+    globe.rotation.y+=dx*k;globe.rotation.x=Math.max(-1.3,Math.min(1.3,globe.rotation.x+dy*k));}
+  }else if(ptrs.size===2){
+    ptrs.set(e.pointerId,n);const [a,b]=[...ptrs.values()],d=Math.hypot(a[0]-b[0],a[1]-b[1]);
+    if(pinch)zoom((pinch-d)*.01);pinch=d;moved=99;
+  }
+  ptrs.set(e.pointerId,n);
+});
+const up=e=>{
+  if(ptrs.size===1&&moved<8)click(e.clientX,e.clientY);
+  ptrs.delete(e.pointerId);pinch=0;
+};
+ren.domElement.addEventListener('pointerup',up);
+ren.domElement.addEventListener('pointercancel',e=>{ptrs.delete(e.pointerId)});
+ren.domElement.addEventListener('wheel',e=>{e.preventDefault();zoom(e.deltaY*.002)},{passive:false});
+function zoom(d){cam.position.z=Math.max(1.8,Math.min(5,cam.position.z+d))}
+function click(x,y){
+  if(mode==='flat'){
+    const g=fgeom(),px=((((x-ox)%g.Wd)+g.Wd)%g.Wd/g.sc)|0,py=((y-g.y0)/g.sc)|0;
+    if(py>=0&&py<H)pick(map[py*W+Math.min(px,W-1)]);return;
+  }
+  ray.setFromCamera(new THREE.Vector2(x/innerWidth*2-1,-(y/innerHeight)*2+1),cam);
+  const h=ray.intersectObject(mesh)[0];if(!h)return;
+  const l=globe.worldToLocal(h.point.clone()).normalize();
+  let b=0,bd=-2;pts.forEach((p,i)=>{const d=p.dot(l);if(d>bd){bd=d;b=i}});
+  pick(b);
+}
+addEventListener('resize',()=>{cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();ren.setSize(innerWidth,innerHeight)});
+
+// ===== СТАРТ =====
+paint();mkAll();startTurn();
+globe.rotation.x=.3;
+// ===== ПЛОСКИЙ РЕЖИМ =====
+const fc=document.createElement('canvas'),fx=fc.getContext('2d'),dpr=Math.min(devicePixelRatio,2);
+fc.style.cssText='position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;display:none';document.body.prepend(fc);
+const fp=pts.map(p=>[((Math.atan2(p.z,-p.x)+2*Math.PI)%(2*Math.PI))/(2*Math.PI)*W,Math.acos(p.y)/Math.PI*H]);
+let mode=null,ox=0;
+function fgeom(){const sc=Math.max(innerHeight*.6/H,innerWidth/W);return{sc,Wd:W*sc,y0:(innerHeight-H*sc)/2}}
+function fresize(){fc.width=innerWidth*dpr;fc.height=innerHeight*dpr;fx.setTransform(dpr,0,0,dpr,0,0)}
+addEventListener('resize',fresize);fresize();
+function drawFlat(){
+  const g=fgeom();ox=((ox%g.Wd)+g.Wd)%g.Wd;fx.clearRect(0,0,innerWidth,innerHeight);
+  for(let k=-1;k<=1;k++){
+    const bx=ox+k*g.Wd;if(bx>innerWidth||bx+g.Wd<0)continue;
+    fx.drawImage(cv,bx,g.y0,g.Wd,H*g.sc);
+    for(let i=0;i<N;i++)fx.drawImage(mc[i],bx+fp[i][0]*g.sc-22,g.y0+fp[i][1]*g.sc-22,44,44);
+  }
+}
+function start(m){
+  mode=m;$('menu').style.display='none';
+  if(m==='flat'){fc.style.display='block';ren.domElement.style.opacity=0}
+  startTurn();
+}
+(function loop(){requestAnimationFrame(loop);
+  if(mode==='flat')drawFlat();else{if(!ptrs.size)globe.rotation.y+=.0006;ren.render(scene,cam)}
+})();
+</script></body></html>
